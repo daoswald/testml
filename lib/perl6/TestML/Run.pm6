@@ -23,6 +23,22 @@ has $!vtable = {
   '='     => 'set-var',
 };
 
+has $!types = {
+  string => 'str',
+  number => 'num',
+  boolean => 'bool',
+  testml => {
+    '=>' => 'func',
+    '/' => 'regex',
+    '!' => 'error',
+    '?' => 'native',
+  },
+  group => {
+    Object => 'hash',
+    Array => 'list',
+  }
+};
+
 has TestML::Block $.block;
 
 has Str $!file;
@@ -86,7 +102,11 @@ method setv($name, $value) {
 }
 
 #------------------------------------------------------------------------------
-method exec($expr, $context=[]) {
+method exec($expr) {
+  self.exec_expr($expr)[0];
+}
+
+method exec_expr($expr, $context=[]) {
   return [$expr] if
     not $expr ~~ Array or
     $expr[0] ~~ Array or
@@ -101,7 +121,7 @@ method exec($expr, $context=[]) {
   }
   else {
     @args = @args.map: {
-      $_ ~~ Array ?? self.exec($_)[0] !! $_;
+      $_ ~~ Array ?? self.exec($_) !! $_;
     };
 
     @args.unshift($_) for $context.reverse;
@@ -116,10 +136,7 @@ method exec($expr, $context=[]) {
       @return = $!bridge."$call"(|@args);
     }
     elsif ($name ~~ /^<[A..Z]>/) {
-      $call = $name.lc;
-      die "Unknown TestML Standard Library function: '$name'"
-        unless $!stdlib.can($call);
-      @return = $!stdlib."$call"(|@args);
+      @return = self.call_stdlib($name, @args);
     }
     else {
       die "Can't resolve TestML function '$name'";
@@ -133,7 +150,7 @@ method exec-func($context, @function) {
   my $signature = @function.shift;
 
   for @function -> $statement {
-    self.exec($statement);
+    self.exec_expr($statement);
   }
 
   return;
@@ -143,7 +160,7 @@ method exec-expr(*@args) {
   my $context = [];
 
   for |@args -> $call {
-    $context = self.exec($call, $context);
+    $context = self.exec_expr($call, $context);
   }
 
   return |$context;
@@ -153,7 +170,7 @@ method pick-loop($list, $expr) {
   for |$!data -> $block {
     $!block = $block;
 
-    self.exec(['()', $list, $expr]);
+    self.exec_expr(['()', $list, $expr]);
   }
 
   $!block = Nil;
@@ -175,7 +192,7 @@ method pick-exec($list, $expr) {
   }
 
   if $pick {
-    self.exec($expr);
+    self.exec_expr($expr);
   }
 }
 
@@ -194,15 +211,15 @@ method get-point($name) {
 }
 
 method set-var($name, $expr) {
-  self.setv($name, self.exec($expr)[0]);
+  self.setv($name, self.exec($expr));
 
   return;
 }
 
 method assert-eq($left, $right, $label-expr='') {
-  my $got = self.exec($left)[0];
+  my $got = self.exec($left);
 
-  my $want = self.exec($right)[0];
+  my $want = self.exec($right);
 
   my $label = self.get-label($label-expr);
 
@@ -212,6 +229,59 @@ method assert-eq($left, $right, $label-expr='') {
 }
 
 #------------------------------------------------------------------------------
+method type ($value) {
+  return Nil if $value ~~ Nil;
+
+  return 'str' if $value ~~ Str;
+  return 'num' if $value ~~ Int;
+  return 'regex' if $value ~~ Array and
+    $value.elems == 2 and
+    $value[0] ~~ Str and
+    $value[0] eq '/';
+
+  die 43;
+}
+
+method cook($value) {
+  #  return [] if not $value.defined;
+  return Nil if not $value.defined;
+  return $value if $value ~~ Str | Bool | Num | Int;
+  return ['/', $value] if $value ~~ Regex;
+  die 42;
+}
+
+method uncook($value) {
+  my $type = self.type($value);
+  if $type eq 'regex' {
+    if $value[1] ~~ Str {
+      return rx/$value[1]/;
+    }
+    return $value[1];
+  }
+  if $type ~~ 'str' | 'num' {
+    return $value;
+  }
+  die 44;
+}
+
+method call_stdlib($name, @args) {
+  require TestML::StdLib;
+  $!stdlib ||= TestML::StdLib.new:
+    run => self;
+
+  my $call = $name.lc;
+  die "Unknown TestML Standard Library function: '$name'"
+    unless $!stdlib.can($call);
+
+  @args = [
+    @args.map: {
+      self.uncook(self.exec($_));
+    }
+  ];
+
+  self.cook($!stdlib."$call"(|@args));
+}
+
 method initialize {
   $!code.unshift([]);
 
@@ -221,21 +291,16 @@ method initialize {
     }
   ];
 
-  if not $!stdlib {
-    require TestML::StdLib;
-    $!stdlib = TestML::StdLib.new;
-  }
-
   return;
 }
 
 method get-label($label-expr='') {
-  my $label = self.exec($label-expr)[0];
+  my $label = self.exec($label-expr);
 
   if not $label {
     $label = self.getv('Label') || '';
     if $label ~~ /\{\*?<[\w\-]>\}/ {
-      $label = self.exec(["\$''", $label])[0];
+      $label = self.exec(["\$''", $label]);
     }
   }
 
